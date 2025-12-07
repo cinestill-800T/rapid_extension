@@ -1,0 +1,50 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Rapidgator Batch Downloader</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <h1>🚀 Rapidgator Downloader</h1>
+    
+    <div class="status-section">
+      <p class="status" id="status">準備完了</p>
+      <p class="tab-count" id="tabCount">対象タブ: <span id="count">0</span> 件</p>
+    </div>
+
+    <div class="settings-section">
+      <label for="maxConcurrent">最大同時ダウンロード数:</label>
+      <div class="input-group">
+        <input type="number" id="maxConcurrent" min="1" max="50" value="10">
+        <button id="saveSettings" class="btn-secondary">保存</button>
+      </div>
+    </div>
+
+    <div class="button-section">
+      <button id="startDownload" class="btn-primary">
+        ダウンロード開始
+      </button>
+      <button id="refreshTabs" class="btn-secondary">
+        タブを再検索
+      </button>
+    </div>
+
+    <div class="progress-section" id="progressSection" style="display: none;">
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <p class="progress-text" id="progressText">0 / 0 完了</p>
+    </div>
+
+    <div class="log-section" id="logSection">
+      <h3>ログ</h3>
+      <div class="log-container" id="logContainer"></div>
+    </div>
+  </div>
+
+  <script src="popup.js"></script>
+</body>
+</html>
