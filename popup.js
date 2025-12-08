@@ -137,6 +137,16 @@ async function startDownload() {
             try {
                 await clickDownloadButton(tab);
                 log(`成功: ${fileName}`, 'success');
+
+                // ダウンロード開始後、少し待ってからタブを閉じる
+                await sleep(5000);
+
+                try {
+                    await chrome.tabs.remove(tab.id);
+                    log(`タブを閉じました: ${fileName}`, 'info');
+                } catch (closeError) {
+                    log(`タブを閉じられませんでした: ${fileName}`, 'error');
+                }
             } catch (error) {
                 log(`失敗: ${fileName} - ${error.message}`, 'error');
             }
