@@ -40,29 +40,50 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
  * Process a single tab: click button, wait for download, close tab
  * Returns a promise that resolves when download starts (not just button click)
  */
+/**
+ * Process a single tab: click button, wait for download, close tab
+ * Returns a promise that resolves when download starts (not just button click)
+ */
 async function processTab(tab) {
-    const { id: tabId } = tab;
-    console.log(`[BG] Processing tab ${tabId}`);
+    const { id: tabId, url } = tab;
+    console.log(`[BG] Processing tab ${tabId} : ${url}`);
+
+    // Extract expected filename from URL for matching
+    // URL format: https://rapidgator.net/file/xxxx/Filename.ext.html
+    let expectedFilename = null;
+    try {
+        const urlObj = new URL(url);
+        const parts = urlObj.pathname.split('/');
+        const lastPart = parts[parts.length - 1];
+        if (lastPart) {
+            expectedFilename = decodeURIComponent(lastPart.replace('.html', ''));
+        }
+    } catch (e) {
+        console.warn(`[BG] Failed to extract filename from ${url}`, e);
+    }
+    console.log(`[BG] Tab ${tabId} expects filename: ${expectedFilename}`);
 
     // Step 1: Get the highest download ID currently in browser
-    // New downloads will have IDs greater than this
     const allDownloads = await chrome.downloads.search({ orderBy: ['-startTime'], limit: 1 });
     const maxIdBefore = allDownloads.length > 0 ? allDownloads[0].id : 0;
-    console.log(`[BG] Max download ID before click: ${maxIdBefore}`);
 
     // Step 2: Click the download button
+    let clickedLinkUrl = null;
     try {
-        await clickDownloadButton(tabId);
-        console.log(`[BG] Clicked button on tab ${tabId}`);
+        const result = await clickDownloadButton(tabId);
+        if (result && result.clickedUrl) {
+            clickedLinkUrl = result.clickedUrl;
+            console.log(`[BG] Tab ${tabId} clicked direct link: ${clickedLinkUrl}`);
+        }
     } catch (error) {
         console.error(`[BG] Failed to click button on tab ${tabId}:`, error);
         return { success: false, error: error.message, tabId };
     }
 
-    // Step 3: Wait for a new download to appear (ID > maxIdBefore)
+    // Step 3: Wait for a MATCHING new download to appear
     try {
-        const newDownload = await waitForNewDownload(maxIdBefore);
-        console.log(`[BG] Download detected for tab ${tabId}: ID=${newDownload.id}`);
+        const newDownload = await waitForMatchingDownload(maxIdBefore, expectedFilename, clickedLinkUrl);
+        console.log(`[BG] Download confirmed for tab ${tabId}: ID=${newDownload.id} Name=${newDownload.filename}`);
 
         // Step 4: Close the tab
         try {
@@ -70,13 +91,12 @@ async function processTab(tab) {
             console.log(`[BG] Tab ${tabId} closed successfully`);
         } catch (closeError) {
             console.warn(`[BG] Could not close tab ${tabId}:`, closeError.message);
-            // Download started, so this is still a success
         }
 
         return { success: true, tabId, downloadId: newDownload.id };
     } catch (error) {
         console.error(`[BG] Timeout waiting for download on tab ${tabId}`);
-        return { success: false, error: 'ダウンロード開始のタイムアウト', tabId };
+        return { success: false, error: 'ダウンロード開始のタイムアウト (一致するファイルが見つかりません)', tabId };
     }
 }
 
@@ -87,84 +107,87 @@ async function clickDownloadButton(tabId) {
     const results = await chrome.scripting.executeScript({
         target: { tabId },
         func: () => {
-            // Strategy 1: Find the direct download link (premium accounts)
-            // This is the actual file download link like: https://s64.rapidgator.net/download/...
+            // Strategy 1: Find direct link
             const directLink = document.querySelector('a[href*="rapidgator.net/download/"]');
             if (directLink) {
-                console.log('[RG] Found direct download link:', directLink.href);
-                // Click the link directly (will trigger download without losing page)
+                // Click direct link
                 directLink.click();
-                return { success: true, method: 'direct_link' };
+                return { success: true, method: 'direct_link', clickedUrl: directLink.href };
             }
 
-            // Strategy 2: Click the download button (may trigger JS)
+            // Strategy 2: Click .btn-download
             const downloadBtn = document.querySelector('.btn-download');
             if (downloadBtn) {
-                console.log('[RG] Clicking .btn-download button');
                 downloadBtn.click();
-                return { success: true, method: 'btn_click' };
+                return { success: true, method: 'btn_click', clickedUrl: null };
             }
 
-            // Strategy 3: Look for any link that starts a download
+            // Strategy 3: Generic download link
             const anyDownloadLink = document.querySelector('a[href*="/download/"]');
             if (anyDownloadLink) {
-                console.log('[RG] Found generic download link:', anyDownloadLink.href);
                 anyDownloadLink.click();
-                return { success: true, method: 'generic_link' };
+                return { success: true, method: 'generic_link', clickedUrl: anyDownloadLink.href };
             }
 
             return { success: false, error: 'ダウンロードリンクが見つかりません' };
         }
     });
 
-    if (!results || !results[0]) {
-        throw new Error('スクリプト実行に失敗しました');
+    if (!results || !results[0] || !results[0].result || !results[0].result.success) {
+        const msg = results?.[0]?.result?.error || 'スクリプト実行失敗';
+        throw new Error(msg);
     }
 
-    const result = results[0].result;
-    if (!result || !result.success) {
-        throw new Error(result?.error || 'ダウンロードリンクが見つかりません');
-    }
-
-    console.log(`[BG] Download initiated via ${result.method}`);
+    return results[0].result;
 }
 
 /**
- * Wait for a new download to appear (download ID > maxIdBefore)
+ * Wait for a new download that MATCHES the tab's content
  */
-function waitForNewDownload(maxIdBefore) {
+function waitForMatchingDownload(maxIdBefore, expectedFilename, expectedUrl) {
     return new Promise((resolve, reject) => {
         const startTime = Date.now();
 
-        const checkForNewDownload = async () => {
-            // Check if we've exceeded timeout
+        const checkLoop = async () => {
             if (Date.now() - startTime > CONFIG.DOWNLOAD_TIMEOUT_MS) {
                 reject(new Error('Timeout'));
                 return;
             }
 
-            // Query recent downloads
-            const recentDownloads = await chrome.downloads.search({
+            // Get recent downloads newer than our snapshot
+            const recent = await chrome.downloads.search({
                 orderBy: ['-startTime'],
                 limit: 10
             });
 
-            // Find any download with ID greater than maxIdBefore
-            const newDownload = recentDownloads.find(d =>
+            // Filter for NEW downloads
+            const newDownloads = recent.filter(d =>
                 d.id > maxIdBefore &&
                 (d.state === 'in_progress' || d.state === 'complete')
             );
 
-            if (newDownload) {
-                resolve(newDownload);
+            // Look for a match
+            const match = newDownloads.find(d => {
+                // Check 1: Exact URL match (strongest signal)
+                if (expectedUrl && d.url === expectedUrl) return true;
+                if (expectedUrl && d.finalUrl === expectedUrl) return true;
+
+                // Check 2: Filename inclusion (robust signal)
+                if (expectedFilename && d.filename && d.filename.includes(expectedFilename)) return true;
+
+                // Fallback: If we have no info, we can't safely match in concurrent mode
+                // But for Rapidgator, we almost always have expectedFilename from tab URL.
+                return false;
+            });
+
+            if (match) {
+                resolve(match);
             } else {
-                // Keep polling
-                setTimeout(checkForNewDownload, CONFIG.POLL_INTERVAL_MS);
+                setTimeout(checkLoop, CONFIG.POLL_INTERVAL_MS);
             }
         };
 
-        // Start polling
-        checkForNewDownload();
+        checkLoop();
     });
 }
 
