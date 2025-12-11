@@ -13,16 +13,6 @@ const logContainer = document.getElementById('logContainer');
 // State
 let rapidgatorTabs = [];
 let isDownloading = false;
-let downloadStates = new Map(); // tabId -> state
-
-// State constants (mirror background.js)
-const STATE = {
-    PENDING: 'pending',
-    CLICKED: 'clicked',
-    DOWNLOADING: 'downloading',
-    COMPLETED: 'completed',
-    FAILED: 'failed'
-};
 
 // =============================================================================
 // Initialization
@@ -31,100 +21,12 @@ const STATE = {
 document.addEventListener('DOMContentLoaded', async () => {
     await loadSettings();
     await findRapidgatorTabs();
-    await syncStatesFromBackground();
-    setupMessageListener();
 });
 
 // Event Listeners
 saveSettingsBtn.addEventListener('click', saveSettings);
 startDownloadBtn.addEventListener('click', startDownload);
 refreshTabsBtn.addEventListener('click', findRapidgatorTabs);
-
-// =============================================================================
-// Background Communication
-// =============================================================================
-
-/**
- * Listen for messages from background script
- */
-function setupMessageListener() {
-    chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-        switch (message.event) {
-            case 'downloadStarted':
-                handleDownloadStarted(message.tabId, message.downloadId);
-                break;
-            case 'downloadCompleted':
-                handleDownloadCompleted(message.tabId);
-                break;
-            case 'downloadFailed':
-                handleDownloadFailed(message.tabId, message.reason);
-                break;
-            case 'tabClosed':
-                handleTabClosed(message.tabId);
-                break;
-        }
-    });
-}
-
-/**
- * Sync states from background script
- */
-async function syncStatesFromBackground() {
-    try {
-        const response = await chrome.runtime.sendMessage({ action: 'getStates' });
-        if (response && response.states) {
-            downloadStates.clear();
-            response.states.forEach(state => {
-                downloadStates.set(state.tabId, state);
-            });
-            updateUI();
-        }
-    } catch (error) {
-        // Background might not have any states yet
-    }
-}
-
-// =============================================================================
-// Event Handlers from Background
-// =============================================================================
-
-function handleDownloadStarted(tabId, downloadId) {
-    const state = downloadStates.get(tabId);
-    if (state) {
-        state.state = STATE.DOWNLOADING;
-        state.downloadId = downloadId;
-        log(`DL開始確認: ${state.fileName}`, 'success');
-        updateUI();
-    }
-}
-
-function handleDownloadCompleted(tabId) {
-    const state = downloadStates.get(tabId);
-    if (state) {
-        state.state = STATE.COMPLETED;
-        log(`完了: ${state.fileName}`, 'success');
-        updateUI();
-        checkAllCompleted();
-    }
-}
-
-function handleDownloadFailed(tabId, reason) {
-    const state = downloadStates.get(tabId);
-    if (state) {
-        state.state = STATE.FAILED;
-        state.error = reason;
-        log(`失敗: ${state.fileName} - ${reason}`, 'error');
-        updateUI();
-        checkAllCompleted();
-    }
-}
-
-function handleTabClosed(tabId) {
-    const state = downloadStates.get(tabId);
-    if (state) {
-        log(`タブを閉じました: ${state.fileName}`, 'info');
-    }
-}
 
 // =============================================================================
 // Settings
@@ -219,12 +121,12 @@ async function startDownload() {
     startDownloadBtn.disabled = true;
     refreshTabsBtn.disabled = true;
 
-    // Clear previous states in background
-    await chrome.runtime.sendMessage({ action: 'clearStates' });
-    downloadStates.clear();
-
-    const maxConcurrent = parseInt(maxConcurrentEl.value, 10) || 10;
+    const maxConcurrent = parseInt(maxConcurrentEl.value, 10) || 3;
     const totalTabs = rapidgatorTabs.length;
+    let completed = 0;
+    let failed = 0;
+    let currentIndex = 0;
+    let activeSlots = 0;
 
     // Show progress section
     progressSection.style.display = 'block';
@@ -232,118 +134,79 @@ async function startDownload() {
 
     log(`ダウンロード開始: ${totalTabs} 件 (最大同時 ${maxConcurrent} 件)`, 'info');
 
-    // Initialize states for all tabs
-    rapidgatorTabs.forEach(tab => {
-        downloadStates.set(tab.id, {
-            tabId: tab.id,
-            url: tab.url,
-            fileName: extractFileName(tab.url) || `タブ ${tab.id}`,
-            state: STATE.PENDING
-        });
-    });
+    // Process a single tab (returns when download starts or fails)
+    const processSingleTab = async (tab) => {
+        const fileName = extractFileName(tab.url) || `タブ ${tab.id}`;
+        log(`処理中: ${fileName}`, 'info');
 
-    // Process tabs with concurrency limit
-    let currentIndex = 0;
-    let activeDownloads = 0;
+        try {
+            // Send to background - this waits until download starts or timeout
+            const response = await chrome.runtime.sendMessage({
+                action: 'processTab',
+                tab: { id: tab.id, url: tab.url }
+            });
 
+            if (response.success) {
+                log(`✓ 完了: ${fileName} (タブを閉じました)`, 'success');
+                completed++;
+            } else {
+                log(`✗ 失敗: ${fileName} - ${response.error}`, 'error');
+                failed++;
+            }
+        } catch (error) {
+            log(`✗ 失敗: ${fileName} - ${error.message}`, 'error');
+            failed++;
+        }
+
+        updateProgress(completed, totalTabs);
+        statusEl.textContent = `処理中: ${completed + failed}/${totalTabs} (成功: ${completed}, 失敗: ${failed})`;
+    };
+
+    // Process with concurrency control
     const processNext = async () => {
-        while (currentIndex < totalTabs && activeDownloads < maxConcurrent) {
+        while (currentIndex < totalTabs && activeSlots < maxConcurrent) {
             const tab = rapidgatorTabs[currentIndex];
             currentIndex++;
-            activeDownloads++;
+            activeSlots++;
 
-            const state = downloadStates.get(tab.id);
-            log(`処理中: ${state.fileName}`, 'info');
+            // Process this tab (async, but we track activeSlots)
+            processSingleTab(tab).then(() => {
+                activeSlots--;
+                // Try to process more
+                processNext();
+            });
 
-            try {
-                // Send to background for processing
-                const response = await chrome.runtime.sendMessage({
-                    action: 'startDownload',
-                    tab: { id: tab.id, url: tab.url }
-                });
+            // Small delay between starting new downloads
+            await sleep(300);
+        }
 
-                if (response.success) {
-                    state.state = STATE.CLICKED;
-                    log(`クリック完了: ${state.fileName} (DL開始待機中...)`, 'info');
-                } else {
-                    state.state = STATE.FAILED;
-                    state.error = response.error;
-                    log(`失敗: ${state.fileName} - ${response.error}`, 'error');
-                }
-            } catch (error) {
-                state.state = STATE.FAILED;
-                state.error = error.message;
-                log(`失敗: ${state.fileName} - ${error.message}`, 'error');
-            }
-
-            downloadStates.set(tab.id, state);
-            updateUI();
-            activeDownloads--;
-
-            // Small delay between starting downloads
-            await sleep(500);
-
-            // Continue processing
-            processNext();
+        // Check if all done
+        if (completed + failed >= totalTabs) {
+            finishDownload(completed, failed, totalTabs);
         }
     };
 
-    // Start initial batch
+    // Start processing
     processNext();
 }
 
-// =============================================================================
-// Retry Failed Downloads
-// =============================================================================
+function finishDownload(completed, failed, total) {
+    isDownloading = false;
+    startDownloadBtn.disabled = false;
+    refreshTabsBtn.disabled = false;
 
-async function retryFailed(tabId) {
-    const state = downloadStates.get(tabId);
-    if (!state || state.state !== STATE.FAILED) return;
-
-    log(`再試行: ${state.fileName}`, 'info');
-
-    try {
-        const response = await chrome.runtime.sendMessage({
-            action: 'retryFailed',
-            tabId: tabId
-        });
-
-        if (response.success) {
-            state.state = STATE.CLICKED;
-            state.error = null;
-            downloadStates.set(tabId, state);
-            log(`再試行開始: ${state.fileName}`, 'info');
-        } else {
-            log(`再試行失敗: ${state.fileName} - ${response.error}`, 'error');
-        }
-    } catch (error) {
-        log(`再試行失敗: ${state.fileName} - ${error.message}`, 'error');
-    }
-
-    updateUI();
-}
-
-// =============================================================================
-// UI Updates
-// =============================================================================
-
-function updateUI() {
-    const states = Array.from(downloadStates.values());
-    const completed = states.filter(s => s.state === STATE.COMPLETED).length;
-    const failed = states.filter(s => s.state === STATE.FAILED).length;
-    const total = states.length;
-
-    updateProgress(completed, total);
-
-    // Update status text
     if (failed > 0) {
-        statusEl.textContent = `${completed}/${total} 完了 (${failed} 件失敗)`;
-    } else if (completed === total && total > 0) {
-        statusEl.textContent = 'すべてのダウンロードが完了しました';
+        statusEl.textContent = `完了: ${completed}/${total} 成功 (${failed} 件失敗)`;
+        log(`処理完了: ${completed} 件成功、${failed} 件失敗`, 'error');
     } else {
-        statusEl.textContent = `処理中: ${completed}/${total}`;
+        statusEl.textContent = `すべてのダウンロードが完了しました (${completed} 件)`;
+        log(`すべてのダウンロードが完了しました (${completed} 件)`, 'success');
     }
 }
+
+// =============================================================================
+// UI Utilities
+// =============================================================================
 
 function updateProgress(current, total) {
     const percentage = total > 0 ? (current / total) * 100 : 0;
@@ -351,50 +214,14 @@ function updateProgress(current, total) {
     progressText.textContent = `${current} / ${total} 完了`;
 }
 
-function checkAllCompleted() {
-    const states = Array.from(downloadStates.values());
-    const pending = states.filter(s =>
-        s.state === STATE.PENDING ||
-        s.state === STATE.CLICKED ||
-        s.state === STATE.DOWNLOADING
-    );
-
-    if (pending.length === 0 && states.length > 0) {
-        finishDownload();
-    }
-}
-
-function finishDownload() {
-    isDownloading = false;
-    startDownloadBtn.disabled = false;
-    refreshTabsBtn.disabled = false;
-
-    const states = Array.from(downloadStates.values());
-    const failed = states.filter(s => s.state === STATE.FAILED);
-
-    if (failed.length > 0) {
-        log(`完了: ${failed.length} 件のダウンロードが失敗しました。再試行可能です。`, 'error');
-        // Add retry prompt
-        failed.forEach(state => {
-            log(`  → [再試行] ${state.fileName}`, 'error');
-        });
-    } else {
-        log('すべてのダウンロードが完了しました', 'success');
-    }
-}
-
-// =============================================================================
-// Utility Functions
-// =============================================================================
-
 function log(message, type = 'info') {
     const entry = document.createElement('div');
     entry.className = `log-entry ${type}`;
     entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
     logContainer.insertBefore(entry, logContainer.firstChild);
 
-    // Keep only last 50 entries
-    while (logContainer.children.length > 50) {
+    // Keep only last 100 entries
+    while (logContainer.children.length > 100) {
         logContainer.removeChild(logContainer.lastChild);
     }
 }
