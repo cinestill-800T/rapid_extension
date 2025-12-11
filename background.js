@@ -92,8 +92,8 @@ async function clickDownloadButton(tabId) {
             const directLink = document.querySelector('a[href*="rapidgator.net/download/"]');
             if (directLink) {
                 console.log('[RG] Found direct download link:', directLink.href);
-                // Navigate to the download link
-                window.location.href = directLink.href;
+                // Click the link directly (will trigger download without losing page)
+                directLink.click();
                 return { success: true, method: 'direct_link' };
             }
 
@@ -109,7 +109,7 @@ async function clickDownloadButton(tabId) {
             const anyDownloadLink = document.querySelector('a[href*="/download/"]');
             if (anyDownloadLink) {
                 console.log('[RG] Found generic download link:', anyDownloadLink.href);
-                window.location.href = anyDownloadLink.href;
+                anyDownloadLink.click();
                 return { success: true, method: 'generic_link' };
             }
 
