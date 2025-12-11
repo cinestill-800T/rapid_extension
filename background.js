@@ -14,9 +14,6 @@ const CONFIG = {
     POLL_INTERVAL_MS: 500        // Check every 500ms
 };
 
-// Track active processing
-const processingTabs = new Map(); // tabId -> { resolve, reject, timeoutId }
-
 // =============================================================================
 // Message Handling
 // =============================================================================
@@ -47,9 +44,11 @@ async function processTab(tab) {
     const { id: tabId } = tab;
     console.log(`[BG] Processing tab ${tabId}`);
 
-    // Step 1: Get current download count to detect new downloads
-    const downloadsBefore = await chrome.downloads.search({ state: 'in_progress' });
-    const downloadIdsBefore = new Set(downloadsBefore.map(d => d.id));
+    // Step 1: Get the highest download ID currently in browser
+    // New downloads will have IDs greater than this
+    const allDownloads = await chrome.downloads.search({ orderBy: ['-startTime'], limit: 1 });
+    const maxIdBefore = allDownloads.length > 0 ? allDownloads[0].id : 0;
+    console.log(`[BG] Max download ID before click: ${maxIdBefore}`);
 
     // Step 2: Click the download button
     try {
@@ -60,10 +59,10 @@ async function processTab(tab) {
         return { success: false, error: error.message, tabId };
     }
 
-    // Step 3: Wait for a new download to appear
+    // Step 3: Wait for a new download to appear (ID > maxIdBefore)
     try {
-        const newDownload = await waitForNewDownload(downloadIdsBefore);
-        console.log(`[BG] Download detected for tab ${tabId}:`, newDownload.id);
+        const newDownload = await waitForNewDownload(maxIdBefore);
+        console.log(`[BG] Download detected for tab ${tabId}: ID=${newDownload.id}`);
 
         // Step 4: Close the tab
         try {
@@ -103,9 +102,9 @@ async function clickDownloadButton(tabId) {
 }
 
 /**
- * Wait for a new download to appear (polling approach)
+ * Wait for a new download to appear (download ID > maxIdBefore)
  */
-function waitForNewDownload(existingIds) {
+function waitForNewDownload(maxIdBefore) {
     return new Promise((resolve, reject) => {
         const startTime = Date.now();
 
@@ -116,12 +115,15 @@ function waitForNewDownload(existingIds) {
                 return;
             }
 
-            // Query all current downloads
-            const currentDownloads = await chrome.downloads.search({});
+            // Query recent downloads
+            const recentDownloads = await chrome.downloads.search({
+                orderBy: ['-startTime'],
+                limit: 10
+            });
 
-            // Find any new download (not in existingIds)
-            const newDownload = currentDownloads.find(d =>
-                !existingIds.has(d.id) &&
+            // Find any download with ID greater than maxIdBefore
+            const newDownload = recentDownloads.find(d =>
+                d.id > maxIdBefore &&
                 (d.state === 'in_progress' || d.state === 'complete')
             );
 
@@ -142,4 +144,5 @@ function waitForNewDownload(existingIds) {
 // Initialization
 // =============================================================================
 
-console.log('[BG] Rapidgator Batch Downloader: Background service worker started (v2 - Simplified)');
+console.log('[BG] Rapidgator Batch Downloader: Background service worker started (v3 - Fixed)');
+
