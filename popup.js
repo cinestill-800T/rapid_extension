@@ -125,14 +125,15 @@ async function startDownload() {
     const totalTabs = rapidgatorTabs.length;
     let completed = 0;
     let failed = 0;
-    let currentIndex = 0;
-    let activeSlots = 0;
 
     // Show progress section
     progressSection.style.display = 'block';
     updateProgress(0, totalTabs);
 
     log(`ダウンロード開始: ${totalTabs} 件 (最大同時 ${maxConcurrent} 件)`, 'info');
+
+    // Create a queue of tabs to process
+    const queue = [...rapidgatorTabs];
 
     // Process a single tab (returns when download starts or fails)
     const processSingleTab = async (tab) => {
@@ -162,32 +163,30 @@ async function startDownload() {
         statusEl.textContent = `処理中: ${completed + failed}/${totalTabs} (成功: ${completed}, 失敗: ${failed})`;
     };
 
-    // Process with concurrency control
-    const processNext = async () => {
-        while (currentIndex < totalTabs && activeSlots < maxConcurrent) {
-            const tab = rapidgatorTabs[currentIndex];
-            currentIndex++;
-            activeSlots++;
-
-            // Process this tab (async, but we track activeSlots)
-            processSingleTab(tab).then(() => {
-                activeSlots--;
-                // Try to process more
-                processNext();
-            });
-
-            // Small delay between starting new downloads
-            await sleep(300);
-        }
-
-        // Check if all done
-        if (completed + failed >= totalTabs) {
-            finishDownload(completed, failed, totalTabs);
+    // Worker function: keeps pulling from queue until empty
+    const worker = async () => {
+        while (queue.length > 0) {
+            const tab = queue.shift();
+            if (tab) {
+                await processSingleTab(tab);
+                // Small delay before next task
+                await sleep(300);
+            }
         }
     };
 
-    // Start processing
-    processNext();
+    // Start multiple workers (up to maxConcurrent)
+    const workerCount = Math.min(maxConcurrent, totalTabs);
+    const workers = [];
+    for (let i = 0; i < workerCount; i++) {
+        workers.push(worker());
+    }
+
+    // Wait for all workers to complete
+    await Promise.all(workers);
+
+    // All done
+    finishDownload(completed, failed, totalTabs);
 }
 
 function finishDownload(completed, failed, total) {
