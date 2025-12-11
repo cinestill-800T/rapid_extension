@@ -87,18 +87,46 @@ async function clickDownloadButton(tabId) {
     const results = await chrome.scripting.executeScript({
         target: { tabId },
         func: () => {
-            const downloadBtn = document.querySelector('.btn-download');
-            if (!downloadBtn) {
-                throw new Error('ダウンロードボタンが見つかりません');
+            // Strategy 1: Find the direct download link (premium accounts)
+            // This is the actual file download link like: https://s64.rapidgator.net/download/...
+            const directLink = document.querySelector('a[href*="rapidgator.net/download/"]');
+            if (directLink) {
+                console.log('[RG] Found direct download link:', directLink.href);
+                // Navigate to the download link
+                window.location.href = directLink.href;
+                return { success: true, method: 'direct_link' };
             }
-            downloadBtn.click();
-            return true;
+
+            // Strategy 2: Click the download button (may trigger JS)
+            const downloadBtn = document.querySelector('.btn-download');
+            if (downloadBtn) {
+                console.log('[RG] Clicking .btn-download button');
+                downloadBtn.click();
+                return { success: true, method: 'btn_click' };
+            }
+
+            // Strategy 3: Look for any link that starts a download
+            const anyDownloadLink = document.querySelector('a[href*="/download/"]');
+            if (anyDownloadLink) {
+                console.log('[RG] Found generic download link:', anyDownloadLink.href);
+                window.location.href = anyDownloadLink.href;
+                return { success: true, method: 'generic_link' };
+            }
+
+            return { success: false, error: 'ダウンロードリンクが見つかりません' };
         }
     });
 
-    if (!results || !results[0] || !results[0].result) {
+    if (!results || !results[0]) {
         throw new Error('スクリプト実行に失敗しました');
     }
+
+    const result = results[0].result;
+    if (!result || !result.success) {
+        throw new Error(result?.error || 'ダウンロードリンクが見つかりません');
+    }
+
+    console.log(`[BG] Download initiated via ${result.method}`);
 }
 
 /**
